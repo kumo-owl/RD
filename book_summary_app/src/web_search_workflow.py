@@ -9,6 +9,7 @@ import os
 from openai import OpenAI
 import json
 import requests
+import re
 
 # .envファイルから環境変数を読み込む（book_summary.pyですでに読み込んでいる場合は影響なし）
 try:
@@ -228,8 +229,9 @@ def create_summary_agent():
                 messages=[
                     {"role": "system", "content": f"""あなたは書籍要約の専門家です。以下の検索結果に基づいて、書籍「{book_title}」の要約を作成してください。
 検索結果には「要約済み」と「生データ」が含まれています。両方を参考に、できるだけ正確で包括的な情報を盛り込んでください。
-以下の構成でMarkdown形式で書籍の要約を作成してください：
-```markdown
+
+以下の構成でGitHubのMarkdown形式で書籍の要約を作成してください：
+
 ## 書籍情報
 - タイトル: {book_title}
 - 著者：（分かれば記入）
@@ -250,7 +252,13 @@ def create_summary_agent():
 
 ## 参考文献
 - 検索結果の「生データ」に含まれる情報源（URLなど）があれば記載してください。
-```
+
+注意事項:
+1. バッククォート(```)でMarkdownコードブロックを作成しないでください
+2. 見出しレベルは「##」から始め、「#」は使わないでください
+3. 箇条書きは「- 」を使用してください
+4. GitHubで正常に表示されるMarkdown記法を使用してください
+
 必ず上記のフォーマットに従ってください。空欄にする項目があっても、見出しは削除しないでください。"""},
                     {"role": "user", "content": f"次の検索結果から書籍「{book_title}」の要約を作成してください:\n\n{search_text}"}
                 ],
@@ -348,7 +356,13 @@ def create_revision_agent():
 2. 元の内容の本質は保持する
 3. より明確で読みやすい文章にする
 4. 書籍の価値や特徴を適切に伝える
-5. Markdown形式を維持する"""),
+5. GitHub互換のMarkdown形式を維持する
+
+特に以下のMarkdown記法の注意点を守ってください：
+- バッククォート(```)でコードブロックを作成しない
+- 見出しレベルは「##」から始め、「#」は使わない
+- 箇条書きは「- 」を使用する
+- 複雑なフォーマットは避け、シンプルなMarkdownを使用する"""),
         MessagesPlaceholder(variable_name="messages"),
     ])
 
@@ -363,7 +377,7 @@ def create_revision_agent():
         
         revised_summary = chain.invoke({
             "messages": messages + [
-                HumanMessage(content=f"書籍タイトル：{book_title}\n\n元の要約：\n{summary}\n\nフィードバック：\n{feedback}\n\n上記を参考に、より良い書籍要約を作成してください。")
+                HumanMessage(content=f"書籍タイトル：{book_title}\n\n元の要約：\n{summary}\n\nフィードバック：\n{feedback}\n\n上記を参考に、GitHub対応のMarkdown形式でより良い書籍要約を作成してください。バッククォート(```)でコードブロックを作成せず、シンプルな形式を保ってください。")
             ]
         })
         
@@ -376,61 +390,77 @@ def create_save_agent():
     def save_agent(state: WorkflowState) -> WorkflowState:
         today = datetime.now().strftime("%Y%m%d")
         book_title = state["book_title"]
-        safe_title = "".join(c if c.isalnum() or c in [' ', '_', '-'] else '_' for c in book_title)
+        # ファイル名に使える文字のみを使用し、英数字と一部記号のみにする
+        safe_title = "".join(c if c.isalnum() or c in ['_', '-'] else '_' for c in book_title)
+        # スペースはアンダースコアに置換
+        safe_title = safe_title.replace(' ', '_')
         filename = f"output/book_{safe_title}_{today}.md"
         
         # 出力ディレクトリが存在することを確認
         os.makedirs("output", exist_ok=True)
         
-        # 参照元URLを抽出
+        # 検索結果から参考URLを抽出
         search_results = state["search_results"]
-        # --- 参照元URL抽出ロジック（raw_dataの構造が不明なため一旦コメントアウト） ---
-        # reference_urls = []
-        # for result in search_results:
-        #     if result.get("raw_data") and isinstance(result["raw_data"], dict):
-        #         raw_content = result["raw_data"].get("web_search_response_content")
-        #         # ここでraw_content (文字列) からURLを正規表現などで抽出する必要がある
-        #         # 例: urls_in_content = re.findall(r'https?://[\S]+', raw_content)
-        #         # if urls_in_content:
-        #         #     reference_urls.extend(u for u in urls_in_content if u not in reference_urls)
-        #         pass # 実際の抽出処理を実装する
-
-        # # 参照元URLをMarkdownで整形
-        # references_md = "\n\n## 参照元URL一覧\n"
-        # if reference_urls:
-        #     for url in reference_urls:
-        #         references_md += f"- {url}\n"
-        # else:
-        #     references_md += "- 参照元URLが取得できませんでした\n"
-        # --- ここまでコメントアウト ---
-
+        reference_urls = []
+        
+        # 正規表現でURLを抽出する関数
+        def extract_urls_from_text(text):
+            if not text or not isinstance(text, str):
+                return []
+            # URLの正規表現パターン
+            url_pattern = r'https?://[^\s\)\]\"\']+(?:\.[^\s\)\]\"\']+)+[^\s\)\]\"\'\.,]'
+            return re.findall(url_pattern, text)
+        
+        # 検索結果からURLを抽出
+        for result in search_results:
+            if result.get("raw_data") and isinstance(result["raw_data"], dict):
+                raw_content = result["raw_data"].get("web_search_response_content")
+                if raw_content:
+                    urls = extract_urls_from_text(raw_content)
+                    if urls:
+                        for url in urls:
+                            if url not in reference_urls:
+                                reference_urls.append(url)
+        
+        # GitHub/Markdownで崩れないように整形した内容をファイルに書き込む
         with open(filename, "w", encoding="utf-8") as f:
+            # タイトル
             f.write(f"# 「{book_title}」書籍要約 ({today})\n\n")
+            
+            # 初期要約
             f.write("## 初期要約\n\n")
             f.write(state["initial_summary"])
+            
+            # フィードバック
             f.write("\n\n## フィードバック\n\n")
             f.write(state["agent_feedback"])
+            
+            # 改善後の要約
             f.write("\n\n## 改善後の要約\n\n")
             f.write(state["final_summary"])
-            # f.write(references_md) # URL抽出が実装されるまでコメントアウト
-
-            # 検索クエリと結果の詳細も記録
+            
+            # 参考URLがあれば記載
+            if reference_urls:
+                f.write("\n\n## 参考URL\n\n")
+                for url in reference_urls:
+                    f.write(f"- {url}\n")
+            
+            # 検索クエリと結果の詳細（デバッグ情報）
             f.write("\n\n## 検索クエリと結果 (デバッグ情報)\n\n")
             for i, result in enumerate(search_results, 1):
+                # 検索クエリ
                 f.write(f"### 検索クエリ {i}: {result['query']}\n\n")
-                f.write(f"#### 要約済み応答:\n```\n{result.get('content', 'N/A')}\n```\n\n")
-                # raw_dataの内容を記録
-                raw_data_content = "N/A"
-                if result.get("raw_data"):
-                    try:
-                        # JSONとして整形して出力試行
-                        raw_data_content = json.dumps(result["raw_data"], ensure_ascii=False, indent=2)
-                    except TypeError:
-                        # JSON化できない場合はそのまま文字列として出力
-                        raw_data_content = str(result["raw_data"])
-
-                f.write(f"#### 生データ (raw_data):\n```json\n{raw_data_content}\n```\n\n")
-
+                
+                # 要約済み応答を表示（コードブロック内に入れる）
+                content = result.get('content', 'N/A')
+                # GitHubでの表示時にネストしたコードブロックが問題を起こさないよう修正
+                content = content.replace("```", "~~~")
+                f.write(f"#### 要約済み応答:\n\n{content}\n\n")
+                
+                # 生データは詳細情報を省略
+                f.write("#### 生データ (raw_data):\n\n")
+                f.write("生データの詳細は省略します。\n\n")
+                
         print(f"結果は「{filename}」に保存されました。")
         return state
     return save_agent
