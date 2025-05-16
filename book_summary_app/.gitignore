@@ -27,9 +27,6 @@ var/
 venv/
 .venv/
 
-# 出力ディレクトリ
-output/
-
 # エディタ関連
 .idea/
 .vscode/
